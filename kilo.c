@@ -47,6 +47,8 @@ typedef struct erow {
 
 struct editorConfig {
 	int cx, cy;
+	int rowoff;
+	int coloff;
 	int screenrows;
 	int screencols;
 	int numrows;
@@ -226,18 +228,56 @@ void abFree(struct abuf *ab) {
 void editorMoveCursor(int c) {
 	switch (c) {
 		case ARROW_UP:
-			if (0 < E.cy) E.cy--;
+			if (0 < E.cy) {
+				E.cy--;
+			} else if (0 < E.rowoff) {
+				E.rowoff--;
+			}
 			break;
 		case ARROW_DOWN:
-			if (E.cy < E.screenrows - 1) E.cy++;
+			if (E.cy < E.screenrows - 1) {
+				E.cy++;
+			} else if (E.rowoff + E.screenrows < E.numrows) {
+				E.rowoff += 1;
+			}
 			break;
 		case ARROW_RIGHT:
-			if (E.cx < E.screencols - 1) E.cx++;
+			if (E.cx < E.screencols - 1) {
+				E.cx++;
+			} else if (E.coloff + E.screencols < E.row[E.cy + E.rowoff].size) {
+				E.coloff++;
+			}
 			break;
 		case ARROW_LEFT:
-			if (0 < E.cx) E.cx--;
+			if (0 < E.cx) {
+				E.cx--;
+			} else if (0 < E.coloff) {
+				E.coloff--;
+			} else if (0 < E.cy) {
+				E.cy--;
+				erow *row = &E.row[E.rowoff + E.cy];
+				E.coloff = row->size - E.screencols;
+				E.coloff = 0 < E.coloff ? E.coloff : 0;
+				E.cx = row->size <= E.screencols ? row->size : E.screencols - 1;
+			} else if (0 < E.rowoff) {
+				E.rowoff--;
+				erow *row = &E.row[E.rowoff + E.cy];
+				E.coloff = row->size - E.screencols;
+				E.coloff = 0 < E.coloff ? E.coloff : 0;
+				E.cx = row->size <= E.screencols ? row->size : E.screencols - 1;
+			}
 			break;
 	}
+
+	// snap cursor to lines
+	erow *row = (E.numrows <= E.rowoff + E.cy) ? NULL : &E.row[E.rowoff + E.cy];
+	int rowlen = row ? row->size : 0;
+	if (rowlen < E.coloff + E.cx) {
+		if (rowlen < E.coloff) 
+			E.coloff = rowlen;
+		E.cx = rowlen - E.coloff;
+	}
+
 }
 
 void editorProcessKeypress() {
@@ -282,10 +322,11 @@ void exitClearScreen() {
 
 void editorDrawRows(struct abuf *ab) {
 	for (int y = 0; y < E.screenrows; y++) {
-		if (y < E.numrows) {
-			int linelen = E.row[y].size;
+		if (y + E.rowoff < E.numrows) {
+			int linelen = E.row[E.rowoff + y].size - E.coloff;
+			if (linelen < 0) linelen = 0;
 			if (E.screencols < linelen) linelen = E.screencols;
-			abAppend(ab, E.row[y].chars, linelen);
+			abAppend(ab, &E.row[E.rowoff + y].chars[E.coloff], linelen);
 		
 		} else if (E.numrows == 0 && y == E.screenrows / 3) {
 			char welcome[80];
@@ -335,10 +376,15 @@ void editorRefreshScreen() {
 void initEditor() {
 	E.cx = 0;
 	E.cy = 0;
+	E.rowoff = 0;
+	E.coloff = 0;
 	E.numrows = 0;
 	E.row = NULL;
 
 	if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
+
+	// mac terminal doesn't show last column, it's where scrollbar is
+	E.screencols -= 1;
 }
 
 int main(int argc, char *argv[]) {

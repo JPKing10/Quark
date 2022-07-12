@@ -16,6 +16,8 @@
 
 /*** defines ***/
 
+#define TAB_STOP 4 
+
 #define QUARK_VERSION "0.0.1"
 #define WELCOME_MSG "Hello, friend. Welcome to Quark %s"
 #define CTRL_KEY(k) ((k) & 0x1f) // mirrors what Ctrl key does in terminal
@@ -42,11 +44,14 @@ void editorRefreshScreen(void);
 
 typedef struct erow {
 	int size;
+	int rsize;
 	char *chars;
+	char *render; // help us render stuff like tabs correctly
 } erow;
 
 struct editorConfig {
 	int cx, cy;
+	int rx;
 	int rowoff;
 	int coloff;
 	int screenrows;
@@ -171,6 +176,48 @@ int getWindowSize(int *rows, int *cols) {
 
 /*** row ops ***/
 
+int editorRowCxToRx(erow *row, int cx) {
+	int rx = 0;
+	for (int j = 0; j < cx; j++) {
+		if (row->chars[j] == '\t') {
+			rx += TAB_STOP - rx % TAB_STOP;
+		} else {
+			rx++;
+		}
+	}
+	return rx;
+}
+
+void editorUpdateRow(erow *row) {
+	int render_size = 0;
+	for (int i = 0; i < row->size; i++) {
+		if (row->chars[i] == '\t') {
+			render_size += TAB_STOP;
+		} else {
+			render_size++;
+		}
+	}
+
+	free(row->render);
+	row->render = malloc(render_size);
+
+	int i = 0;
+	for (int j = 0; j < row->size; j++) {
+		if (row->chars[j] == '\t') {
+			row->render[i++] = '='; // otherwise a tab which is aligned to tab stop wont render
+
+			while (i % TAB_STOP != 0) {
+				row->render[i++] = ':';
+			}
+		} else {
+			row->render[i++] = row->chars[j];
+		}
+	}
+
+	row->render[i] = '\0';
+	row->rsize = i;
+}
+
 void editorAppendRow(char *s, size_t len) {
 	E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
 
@@ -179,6 +226,11 @@ void editorAppendRow(char *s, size_t len) {
 	E.row[rowIdx].chars = malloc(len + 1);
 	memcpy(E.row[rowIdx].chars, s, len);
 	E.row[rowIdx].chars[len] = '\0';
+
+	E.row[rowIdx].rsize = 0;
+	E.row[rowIdx].render = NULL;
+	editorUpdateRow(&E.row[rowIdx]);
+
 	E.numrows++;
 }
 
@@ -228,56 +280,37 @@ void abFree(struct abuf *ab) {
 void editorMoveCursor(int c) {
 	switch (c) {
 		case ARROW_UP:
-			if (0 < E.cy) {
+			if (0 < E.cy)
 				E.cy--;
-			} else if (0 < E.rowoff) {
-				E.rowoff--;
-			}
 			break;
 		case ARROW_DOWN:
-			if (E.cy < E.screenrows - 1) {
+			if (E.cy < E.numrows)
 				E.cy++;
-			} else if (E.rowoff + E.screenrows < E.numrows) {
-				E.rowoff += 1;
-			}
 			break;
 		case ARROW_RIGHT:
-			if (E.cx < E.screencols - 1) {
-				E.cx++;
-			} else if (E.coloff + E.screencols < E.row[E.cy + E.rowoff].size) {
-				E.coloff++;
+			E.cx++;
+			if (E.cy < E.numrows && E.row[E.cy].size < E.cx) {
+				E.cy++;
+				E.cx = 0;
 			}
 			break;
 		case ARROW_LEFT:
 			if (0 < E.cx) {
 				E.cx--;
-			} else if (0 < E.coloff) {
-				E.coloff--;
 			} else if (0 < E.cy) {
 				E.cy--;
-				erow *row = &E.row[E.rowoff + E.cy];
-				E.coloff = row->size - E.screencols;
-				E.coloff = 0 < E.coloff ? E.coloff : 0;
-				E.cx = row->size <= E.screencols ? row->size : E.screencols - 1;
-			} else if (0 < E.rowoff) {
-				E.rowoff--;
-				erow *row = &E.row[E.rowoff + E.cy];
-				E.coloff = row->size - E.screencols;
-				E.coloff = 0 < E.coloff ? E.coloff : 0;
-				E.cx = row->size <= E.screencols ? row->size : E.screencols - 1;
+				E.cx = E.row[E.cy].size;
 			}
+
+
 			break;
 	}
 
 	// snap cursor to lines
-	erow *row = (E.numrows <= E.rowoff + E.cy) ? NULL : &E.row[E.rowoff + E.cy];
-	int rowlen = row ? row->size : 0;
-	if (rowlen < E.coloff + E.cx) {
-		if (rowlen < E.coloff) 
-			E.coloff = rowlen;
-		E.cx = rowlen - E.coloff;
+	int rowlen = E.numrows <= E.cy ? 0 : E.row[E.cy].size;
+	if (rowlen < E.cx) {
+		E.cx = rowlen;
 	}
-
 }
 
 void editorProcessKeypress() {
@@ -316,17 +349,35 @@ void editorProcessKeypress() {
 
 /*** output ***/
 
+void editorScroll() {
+	E.rx = 0;
+	if (E.cy < E.numrows) {
+		E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+	}
+
+	if (E.cy < E.rowoff)
+		E.rowoff = E.cy;
+	if (E.rowoff + E.screenrows <= E.cy)
+		E.rowoff = E.cy - E.screenrows + 1;
+	if (E.rx < E.coloff)
+		E.coloff = E.rx;
+	if (E.coloff + E.screencols <= E.rx)
+		E.coloff = E.rx - E.screencols + 1;
+}
+
 void exitClearScreen() {
 	editorRefreshScreen();
 }
 
 void editorDrawRows(struct abuf *ab) {
 	for (int y = 0; y < E.screenrows; y++) {
-		if (y + E.rowoff < E.numrows) {
-			int linelen = E.row[E.rowoff + y].size - E.coloff;
+		int filerow = E.rowoff + y;
+
+		if (filerow < E.numrows) {
+			int linelen = E.row[filerow].rsize - E.coloff;
 			if (linelen < 0) linelen = 0;
 			if (E.screencols < linelen) linelen = E.screencols;
-			abAppend(ab, &E.row[E.rowoff + y].chars[E.coloff], linelen);
+			abAppend(ab, &E.row[E.rowoff + y].render[E.coloff], linelen);
 		
 		} else if (E.numrows == 0 && y == E.screenrows / 3) {
 			char welcome[80];
@@ -354,6 +405,8 @@ void editorDrawRows(struct abuf *ab) {
 void editorRefreshScreen() {
 	struct abuf ab = ABUF_INIT;
 
+	editorScroll();
+
 	abAppend(&ab, "\x1b[?25l", 6); // hide cursor
 	abAppend(&ab, "\x1b[H", 3); // moves cursor to top-left
 
@@ -361,7 +414,7 @@ void editorRefreshScreen() {
 
 	// put cursor in correct position
 	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
 	abAppend(&ab, buf, strlen(buf));
 
 
@@ -376,6 +429,7 @@ void editorRefreshScreen() {
 void initEditor() {
 	E.cx = 0;
 	E.cy = 0;
+	E.rx = 0;
 	E.rowoff = 0;
 	E.coloff = 0;
 	E.numrows = 0;
